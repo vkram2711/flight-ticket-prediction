@@ -6,9 +6,12 @@ import holidays
 from datetime import datetime, timedelta
 import os
 from sklearn.preprocessing import LabelEncoder
+from geopy.distance import geodesic
+import airportsdata
 
 # Constants
 MODEL_DIR = 'model_files'
+CACHE_DIR = 'cache'
 
 @st.cache_resource
 def load_model_components():
@@ -35,6 +38,21 @@ def load_model_components():
     
     return model, scaler, encoders, feature_names, metadata
 
+@st.cache_data
+def load_distance_cache():
+    """Load the distance cache from file."""
+    cache_file = os.path.join(CACHE_DIR, 'distance_cache.pkl')
+    if os.path.exists(cache_file):
+        with open(cache_file, 'rb') as f:
+            return pickle.load(f)
+    return {}
+
+def save_distance_cache(cache):
+    """Save the distance cache to file."""
+    cache_file = os.path.join(CACHE_DIR, 'distance_cache.pkl')
+    with open(cache_file, 'wb') as f:
+        pickle.dump(cache, f)
+
 def get_available_options(encoders):
     """Get available options for each categorical feature."""
     return {
@@ -52,6 +70,42 @@ def create_route_encoder(encoders, new_route):
         all_routes.append(new_route)
     route_encoder.fit(all_routes)
     return route_encoder
+
+def get_airport_coordinates(airport_code):
+    """Get airport coordinates from IATA code using airportsdata."""
+    try:
+        # Load airport data
+        airports = airportsdata.load('IATA')
+        airport = airports.get(airport_code)
+        if airport:
+            return (airport['lat'], airport['lon'])
+        return (0, 0)
+    except Exception as e:
+        st.warning(f"Error getting coordinates for {airport_code}: {str(e)}")
+        return (0, 0)
+
+def calculate_distance(departure_airport, arrival_airport):
+    """Calculate distance between two airports in kilometers using cache."""
+    # Load cache
+    cache = load_distance_cache()
+    
+    # Create cache key
+    cache_key = f"{departure_airport}-{arrival_airport}"
+    
+    # Check if distance is in cache
+    if cache_key in cache:
+        return cache[cache_key]
+    
+    # Calculate distance if not in cache
+    dep_coords = get_airport_coordinates(departure_airport)
+    arr_coords = get_airport_coordinates(arrival_airport)
+    distance = geodesic(dep_coords, arr_coords).kilometers
+    
+    # Store in cache
+    cache[cache_key] = distance
+    save_distance_cache(cache)
+    
+    return distance
 
 def create_features(input_data, encoders):
     """Create features for prediction."""
@@ -74,6 +128,12 @@ def create_features(input_data, encoders):
     # Advanced features
     features['days_until_departure'] = (departure_date - quote_date).days
     features['trip_duration'] = (arrival_date - departure_date).days
+    
+    # Calculate airport distance
+    features['airport_distance'] = calculate_distance(
+        input_data['leg_Departure_Airport'],
+        input_data['leg_Arrival_Airport']
+    )
     
     # Holiday features
     us_holidays = holidays.US()
@@ -200,6 +260,7 @@ def main():
                 st.subheader("Derived Features")
                 derived_features = {
                     'Route': f"{departure_airport} - {arrival_airport}",
+                    'Distance': f"{features['airport_distance']:,.1f} km",
                     'Days until departure': features['days_until_departure'],
                     'Trip duration': features['trip_duration'],
                     'Is holiday': features['is_holiday'],
@@ -208,7 +269,7 @@ def main():
                     'Season': encoders['season'].inverse_transform([features['season_encoded']])[0]
                 }
                 st.write(derived_features)
-    
+        
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
         st.error("Please make sure all model files are present in the model_files directory.")
