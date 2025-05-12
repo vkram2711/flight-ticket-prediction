@@ -84,10 +84,10 @@ def load_and_clean_data(file_path):
 
 
 def get_airport_coordinates(airport_code):
-    """Get airport coordinates from IATA code using airportsdata."""
+    """Get airport coordinates from FAA Location Identifier (LID) using airportsdata."""
     try:
-        # Load airport data
-        airports = airportsdata.load('IATA')
+        # Load airport data using LID dataset
+        airports = airportsdata.load('LID')
         airport = airports.get(airport_code)
         if airport:
             return (airport['lat'], airport['lon'])
