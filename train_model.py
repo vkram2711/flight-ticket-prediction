@@ -1,13 +1,14 @@
 import os
 import pickle
-import pandas as pd
+
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import seaborn as sns
 import xgboost as xgb
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 # Create output directories
 MODEL_DIR = 'model_files'
@@ -22,131 +23,6 @@ def create_output_dirs():
             os.makedirs(directory)
             print(f"Created directory: {directory}")
 
-
-def load_distance_cache():
-    """Load the distance cache from file."""
-    cache_file = os.path.join(CACHE_DIR, 'distance_cache.pkl')
-    if os.path.exists(cache_file):
-        with open(cache_file, 'rb') as f:
-            return pickle.load(f)
-    return {}
-
-
-def save_distance_cache(cache):
-    """Save the distance cache to file."""
-    cache_file = os.path.join(CACHE_DIR, 'distance_cache.pkl')
-    with open(cache_file, 'wb') as f:
-        pickle.dump(cache, f)
-
-
-def validate_and_clean_data(df):
-    """Validate and clean the input data."""
-    print("\nValidating and cleaning data...")
-    
-    # Convert price to numeric and handle any non-numeric values
-    df['price'] = pd.to_numeric(df['price'], errors='coerce')
-    
-    # Remove rows with missing or invalid prices
-    df = df.dropna(subset=['price'])
-    df = df[df['price'] > 0]
-    
-    # Convert dates
-    df['leg_Departure_Date'] = pd.to_datetime(df['leg_Departure_Date'])
-    
-    # Handle missing arrival dates
-    df['leg_Arrival_Date'] = pd.to_datetime(df['leg_Arrival_Date'], errors='coerce')
-    
-    # Remove rows with missing required fields
-    required_columns = ['aircraftModel', 'category', 'leg_Departure_Airport', 'leg_Arrival_Airport']
-    df = df.dropna(subset=required_columns)
-    
-    print(f"Data shape after cleaning: {df.shape}")
-    return df
-
-
-def get_airport_coordinates(airport_code):
-    """Get airport coordinates using airport code rules to determine the correct database."""
-    try:
-        # Rule 1: If code contains numbers, it's a FAA LID
-        if any(char.isdigit() for char in airport_code):
-            airports = airportsdata.load('LID')
-            airport = airports.get(airport_code)
-            if airport:
-                return (airport['lat'], airport['lon'])
-            print(f"FAA LID {airport_code} not found in database")
-            return (0, 0)
-            
-        # Rule 2: If code is 4 letters, it's ICAO
-        if len(airport_code) == 4 and airport_code.isalpha():
-            airports = airportsdata.load('ICAO')
-            airport = airports.get(airport_code)
-            if airport:
-                return (airport['lat'], airport['lon'])
-            print(f"ICAO code {airport_code} not found in database")
-            return (0, 0)
-            
-        # Rule 3: If code is 3 letters, it's IATA
-        if len(airport_code) == 3 and airport_code.isalpha():
-            airports = airportsdata.load('IATA')
-            airport = airports.get(airport_code)
-            if airport:
-                return (airport['lat'], airport['lon'])
-            print(f"IATA code {airport_code} not found in database")
-            return (0, 0)
-            
-        print(f"Invalid airport code format: {airport_code}")
-        return (0, 0)
-    except Exception as e:
-        print(f"Error getting coordinates for {airport_code}: {str(e)}")
-        return (0, 0)
-
-
-def calculate_distance(departure_airport, arrival_airport):
-    """Calculate distance between two airports in kilometers using cache."""
-    # Load cache
-    cache = load_distance_cache()
-    
-    # Create cache key
-    cache_key = f"{departure_airport}-{arrival_airport}"
-    
-    # Check if distance is in cache
-    if cache_key in cache:
-        return cache[cache_key]
-    
-    # Calculate distance if not in cache
-    dep_coords = get_airport_coordinates(departure_airport)
-    arr_coords = get_airport_coordinates(arrival_airport)
-    distance = geodesic(dep_coords, arr_coords).kilometers
-    
-    # Store in cache
-    cache[cache_key] = distance
-    save_distance_cache(cache)
-    
-    return distance
-
-
-def create_features(df):
-    """Create features for the model."""
-    print("\nCreating features...")
-
-    # Calculate distances between airports
-    print("Calculating airport distances...")
-    df['airport_distance'] = df.apply(
-        lambda row: calculate_distance(row['leg_Departure_Airport'], row['leg_Arrival_Airport']),
-        axis=1
-    )
-
-    # Holiday features
-    us_holidays = holidays.US()
-    df['is_holiday'] = df['leg_Departure_Date'].apply(lambda x: x in us_holidays)
-
-    # Weekend features
-    df['is_weekend'] = df['leg_Departure_Date'].dt.dayofweek.isin([5, 6])
-
-    # Route features
-    df['route'] = df['leg_Departure_Airport'] + ' - ' + df['leg_Arrival_Airport']
-
-    return df
 
 
 def encode_features(df):
