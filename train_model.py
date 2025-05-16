@@ -1,17 +1,13 @@
 import os
 import pickle
-
-import airportsdata
-import holidays
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
-import seaborn as sns
+import numpy as np
 import xgboost as xgb
-from geopy.distance import geodesic
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # Create output directories
 MODEL_DIR = 'model_files'
@@ -43,54 +39,62 @@ def save_distance_cache(cache):
         pickle.dump(cache, f)
 
 
-def load_and_clean_data(file_path):
-    """Load and clean the flight data."""
-    print("Loading and cleaning data...")
-
-    # Load data
-    df = pd.read_csv(file_path)
-    print(f"Original data shape: {df.shape}")
-
-    # Clean price data
-    df['price'] = pd.to_numeric(df['price'].replace('TBA', np.nan))
+def validate_and_clean_data(df):
+    """Validate and clean the input data."""
+    print("\nValidating and cleaning data...")
+    
+    # Convert price to numeric and handle any non-numeric values
+    df['price'] = pd.to_numeric(df['price'], errors='coerce')
+    
+    # Remove rows with missing or invalid prices
+    df = df.dropna(subset=['price'])
     df = df[df['price'] > 0]
-
-    # Calculate price bounds using IQR method
-    price_stats = df['price'].describe()
-    Q1 = price_stats['25%']
-    Q3 = price_stats['75%']
-    IQR = Q3 - Q1
-    lower_bound = Q1 - 1.5 * IQR
-    upper_bound = Q3 + 1.5 * IQR
-
-    # Filter prices within bounds
-    df = df[(df['price'] >= lower_bound) & (df['price'] <= upper_bound)]
-
-    print("\nPrice cleaning statistics:")
-    print(f"Original price range: ${df['price'].min():,.2f} - ${df['price'].max():,.2f}")
-    print(f"Price bounds: ${lower_bound:,.2f} - ${upper_bound:,.2f}")
-    print(f"Number of rows after price cleaning: {len(df)}")
-
-    # Convert date columns
-    df['quoteDate'] = pd.to_datetime(df['quoteDate'])
+    
+    # Convert dates
     df['leg_Departure_Date'] = pd.to_datetime(df['leg_Departure_Date'])
-    df['leg_Arrival_Date'] = pd.to_datetime(df['leg_Arrival_Date'])
-
-    # Clean passenger number
-    df['leg_Passenger_number_PAX'] = pd.to_numeric(df['leg_Passenger_number_PAX'], errors='coerce')
-    df = df.dropna(subset=['leg_Passenger_number_PAX'])
-
+    
+    # Handle missing arrival dates
+    df['leg_Arrival_Date'] = pd.to_datetime(df['leg_Arrival_Date'], errors='coerce')
+    
+    # Remove rows with missing required fields
+    required_columns = ['aircraftModel', 'category', 'leg_Departure_Airport', 'leg_Arrival_Airport']
+    df = df.dropna(subset=required_columns)
+    
+    print(f"Data shape after cleaning: {df.shape}")
     return df
 
 
 def get_airport_coordinates(airport_code):
-    """Get airport coordinates from FAA Location Identifier (LID) using airportsdata."""
+    """Get airport coordinates using airport code rules to determine the correct database."""
     try:
-        # Load airport data using LID dataset
-        airports = airportsdata.load('LID')
-        airport = airports.get(airport_code)
-        if airport:
-            return (airport['lat'], airport['lon'])
+        # Rule 1: If code contains numbers, it's a FAA LID
+        if any(char.isdigit() for char in airport_code):
+            airports = airportsdata.load('LID')
+            airport = airports.get(airport_code)
+            if airport:
+                return (airport['lat'], airport['lon'])
+            print(f"FAA LID {airport_code} not found in database")
+            return (0, 0)
+            
+        # Rule 2: If code is 4 letters, it's ICAO
+        if len(airport_code) == 4 and airport_code.isalpha():
+            airports = airportsdata.load('ICAO')
+            airport = airports.get(airport_code)
+            if airport:
+                return (airport['lat'], airport['lon'])
+            print(f"ICAO code {airport_code} not found in database")
+            return (0, 0)
+            
+        # Rule 3: If code is 3 letters, it's IATA
+        if len(airport_code) == 3 and airport_code.isalpha():
+            airports = airportsdata.load('IATA')
+            airport = airports.get(airport_code)
+            if airport:
+                return (airport['lat'], airport['lon'])
+            print(f"IATA code {airport_code} not found in database")
+            return (0, 0)
+            
+        print(f"Invalid airport code format: {airport_code}")
         return (0, 0)
     except Exception as e:
         print(f"Error getting coordinates for {airport_code}: {str(e)}")
@@ -125,20 +129,6 @@ def create_features(df):
     """Create features for the model."""
     print("\nCreating features...")
 
-    # Basic date features
-    df['quote_month'] = df['quoteDate'].dt.month
-    df['quote_day'] = df['quoteDate'].dt.day
-    df['quote_dayofweek'] = df['quoteDate'].dt.dayofweek
-
-    df['departure_month'] = df['leg_Departure_Date'].dt.month
-    df['departure_day'] = df['leg_Departure_Date'].dt.day
-    df['departure_dayofweek'] = df['leg_Departure_Date'].dt.dayofweek
-    df['departure_hour'] = df['leg_Departure_Date'].dt.hour
-
-    # Advanced features
-    df['days_until_departure'] = (df['leg_Departure_Date'] - df['quoteDate']).dt.days
-    df['trip_duration'] = (df['leg_Arrival_Date'] - df['leg_Departure_Date']).dt.days
-
     # Calculate distances between airports
     print("Calculating airport distances...")
     df['airport_distance'] = df.apply(
@@ -150,21 +140,8 @@ def create_features(df):
     us_holidays = holidays.US()
     df['is_holiday'] = df['leg_Departure_Date'].apply(lambda x: x in us_holidays)
 
-    # Season features
-    df['season'] = df['leg_Departure_Date'].dt.month.map({
-        12: 'winter', 1: 'winter', 2: 'winter',
-        3: 'spring', 4: 'spring', 5: 'spring',
-        6: 'summer', 7: 'summer', 8: 'summer',
-        9: 'fall', 10: 'fall', 11: 'fall'
-    })
-
     # Weekend features
     df['is_weekend'] = df['leg_Departure_Date'].dt.dayofweek.isin([5, 6])
-
-    # Peak hour features
-    df['is_peak_hour'] = df['departure_hour'].apply(
-        lambda x: (x >= 7 and x <= 9) or (x >= 16 and x <= 19)
-    )
 
     # Route features
     df['route'] = df['leg_Departure_Airport'] + ' - ' + df['leg_Arrival_Airport']
@@ -178,8 +155,7 @@ def encode_features(df):
 
     # Create and fit encoders
     encoders = {}
-    categorical_columns = ['aircraftModel', 'category', 'leg_Departure_Airport',
-                           'leg_Arrival_Airport', 'route', 'season']
+    categorical_columns = ['aircraftModel', 'category', 'leg_Departure_Airport', 'leg_Arrival_Airport', 'route']
 
     for col in categorical_columns:
         le = LabelEncoder()
@@ -195,25 +171,19 @@ def prepare_training_data(df):
 
     # Define feature columns
     feature_columns = [
-        # Basic features
-        'aircraftModel_encoded', 'category_encoded',
-        'leg_Passenger_number_PAX',
+        # Aircraft features
+        'aircraftModel_encoded',
+        'category_encoded',
+
+        # Airport features
+        'leg_Departure_Airport_encoded',
+        'leg_Arrival_Airport_encoded',
+        'route_encoded',
+        'airport_distance',
 
         # Temporal features
-        'quote_month', 'quote_day', 'quote_dayofweek',
-        'departure_month', 'departure_day', 'departure_dayofweek',
-        'departure_hour', 'days_until_departure',
-
-        # Holiday and season features
-        'is_holiday', 'season_encoded',
-
-        # Trip features
-        'trip_duration', 'is_weekend', 'is_peak_hour',
-        'airport_distance',  # Added distance feature
-
-        # Route features
-        'leg_Departure_Airport_encoded', 'leg_Arrival_Airport_encoded',
-        'route_encoded'
+        'is_holiday',
+        'is_weekend'
     ]
 
     # Prepare X and y
@@ -352,11 +322,10 @@ def main():
     # Create output directories
     create_output_dirs()
 
-    # Load and clean data
-    df = load_and_clean_data('CleanOne.csv')
-
-    # Create features
-    df = create_features(df)
+    # Load preprocessed data
+    print("Loading preprocessed data...")
+    df = pd.read_csv('processed_data/model_input_data.csv')
+    print(f"Loaded {len(df)} records")
 
     # Encode features
     df, encoders = encode_features(df)

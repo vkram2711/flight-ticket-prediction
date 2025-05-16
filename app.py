@@ -72,13 +72,36 @@ def create_route_encoder(encoders, new_route):
     return route_encoder
 
 def get_airport_coordinates(airport_code):
-    """Get airport coordinates from FAA Location Identifier (LID) using airportsdata."""
+    """Get airport coordinates using airport code rules to determine the correct database."""
     try:
-        # Load airport data using LID dataset
-        airports = airportsdata.load('LID')
-        airport = airports.get(airport_code)
-        if airport:
-            return (airport['lat'], airport['lon'])
+        # Rule 1: If code contains numbers, it's a FAA LID
+        if any(char.isdigit() for char in airport_code):
+            airports = airportsdata.load('LID')
+            airport = airports.get(airport_code)
+            if airport:
+                return (airport['lat'], airport['lon'])
+            st.warning(f"FAA LID {airport_code} not found in database")
+            return (0, 0)
+            
+        # Rule 2: If code is 4 letters, it's ICAO
+        if len(airport_code) == 4 and airport_code.isalpha():
+            airports = airportsdata.load('ICAO')
+            airport = airports.get(airport_code)
+            if airport:
+                return (airport['lat'], airport['lon'])
+            st.warning(f"ICAO code {airport_code} not found in database")
+            return (0, 0)
+            
+        # Rule 3: If code is 3 letters, it's IATA
+        if len(airport_code) == 3 and airport_code.isalpha():
+            airports = airportsdata.load('IATA')
+            airport = airports.get(airport_code)
+            if airport:
+                return (airport['lat'], airport['lon'])
+            st.warning(f"IATA code {airport_code} not found in database")
+            return (0, 0)
+            
+        st.warning(f"Invalid airport code format: {airport_code}")
         return (0, 0)
     except Exception as e:
         st.warning(f"Error getting coordinates for {airport_code}: {str(e)}")
@@ -110,24 +133,10 @@ def calculate_distance(departure_airport, arrival_airport):
 def create_features(input_data, encoders):
     """Create features for prediction."""
     # Convert dates
-    quote_date = pd.to_datetime(input_data['quoteDate'])
     departure_date = pd.to_datetime(input_data['leg_Departure_Date'])
-    arrival_date = pd.to_datetime(input_data['leg_Arrival_Date'])
     
-    # Basic date features
-    features = {
-        'quote_month': quote_date.month,
-        'quote_day': quote_date.day,
-        'quote_dayofweek': quote_date.dayofweek,
-        'departure_month': departure_date.month,
-        'departure_day': departure_date.day,
-        'departure_dayofweek': departure_date.dayofweek,
-        'departure_hour': departure_date.hour,
-    }
-    
-    # Advanced features
-    features['days_until_departure'] = (departure_date - quote_date).days
-    features['trip_duration'] = (arrival_date - departure_date).days
+    # Basic features
+    features = {}
     
     # Calculate airport distance
     features['airport_distance'] = calculate_distance(
@@ -139,20 +148,8 @@ def create_features(input_data, encoders):
     us_holidays = holidays.US()
     features['is_holiday'] = departure_date in us_holidays
     
-    # Season features
-    season_map = {
-        12: 'winter', 1: 'winter', 2: 'winter',
-        3: 'spring', 4: 'spring', 5: 'spring',
-        6: 'summer', 7: 'summer', 8: 'summer',
-        9: 'fall', 10: 'fall', 11: 'fall'
-    }
-    season = season_map[departure_date.month]
-    
     # Weekend features
     features['is_weekend'] = departure_date.dayofweek in [5, 6]
-    
-    # Peak hour features
-    features['is_peak_hour'] = (7 <= departure_date.hour <= 9) or (16 <= departure_date.hour <= 19)
     
     # Route features
     route = f"{input_data['leg_Departure_Airport']} - {input_data['leg_Arrival_Airport']}"
@@ -165,14 +162,8 @@ def create_features(input_data, encoders):
         value = input_data[col]
         features[f'{col}_encoded'] = encoders[col].transform([value])[0]
     
-    # Encode season
-    features['season_encoded'] = encoders['season'].transform([season])[0]
-    
     # Encode route using the new encoder
     features['route_encoded'] = route_encoder.transform([route])[0]
-    
-    # Add passenger number
-    features['leg_Passenger_number_PAX'] = input_data['leg_Passenger_number_PAX']
     
     return features
 
@@ -197,25 +188,17 @@ def main():
         col1, col2 = st.columns(2)
         
         with col1:
-            # Basic flight information
+            # Aircraft information
             aircraft_model = st.selectbox('Aircraft Model', available_options['aircraftModel'])
             category = st.selectbox('Category', available_options['category'])
+            
+            # Airport information
             departure_airport = st.selectbox('Departure Airport', available_options['leg_Departure_Airport'])
             arrival_airport = st.selectbox('Arrival Airport', available_options['leg_Arrival_Airport'])
-            passengers = st.number_input('Number of Passengers', min_value=1, value=1)
         
         with col2:
-            # Date and time information
-            quote_date = st.date_input('Quote Date', datetime.now())
+            # Date information (only needed for holiday/weekend check)
             departure_date = st.date_input('Departure Date', datetime.now() + timedelta(days=7))
-            departure_time = st.time_input('Departure Time', datetime.now().time())
-            arrival_date = st.date_input('Arrival Date', departure_date)
-            arrival_time = st.time_input('Arrival Time', datetime.now().time())
-        
-        # Combine dates and times
-        quote_datetime = datetime.combine(quote_date, datetime.min.time())
-        departure_datetime = datetime.combine(departure_date, departure_time)
-        arrival_datetime = datetime.combine(arrival_date, arrival_time)
         
         # Create input data dictionary
         input_data = {
@@ -223,10 +206,7 @@ def main():
             'category': category,
             'leg_Departure_Airport': departure_airport,
             'leg_Arrival_Airport': arrival_airport,
-            'leg_Passenger_number_PAX': passengers,
-            'quoteDate': quote_datetime,
-            'leg_Departure_Date': departure_datetime,
-            'leg_Arrival_Date': arrival_datetime
+            'leg_Departure_Date': departure_date
         }
         
         # Create features
@@ -261,12 +241,8 @@ def main():
                 derived_features = {
                     'Route': f"{departure_airport} - {arrival_airport}",
                     'Distance': f"{features['airport_distance']:,.1f} km",
-                    'Days until departure': features['days_until_departure'],
-                    'Trip duration': features['trip_duration'],
                     'Is holiday': features['is_holiday'],
-                    'Is weekend': features['is_weekend'],
-                    'Is peak hour': features['is_peak_hour'],
-                    'Season': encoders['season'].inverse_transform([features['season_encoded']])[0]
+                    'Is weekend': features['is_weekend']
                 }
                 st.write(derived_features)
         
