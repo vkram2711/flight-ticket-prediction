@@ -59,21 +59,32 @@ def clean_and_prepare_data(df):
     df = df.dropna(subset=['price'])
     df = df[df['price'] > 0]
     
-    # Handle price outliers using IQR method
+    # Calculate price statistics
     price_stats = df['price'].describe()
-    Q1 = price_stats['25%']
-    Q3 = price_stats['75%']
-    IQR = Q3 - Q1
-    lower_bound = Q1 - 1.5 * IQR
-    upper_bound = Q3 + 1.5 * IQR
+    print("\nInitial price statistics:")
+    print(price_stats)
     
-    print("\nPrice cleaning statistics:")
-    print(f"Original price range: ${df['price'].min():,.2f} - ${df['price'].max():,.2f}")
-    print(f"Price bounds: ${lower_bound:,.2f} - ${upper_bound:,.2f}")
+    # Calculate z-scores for prices
+    mean_price = df['price'].mean()
+    std_price = df['price'].std()
+    df['price_zscore'] = (df['price'] - mean_price) / std_price
     
-    # Filter prices within bounds
-    df = df[(df['price'] >= lower_bound) & (df['price'] <= upper_bound)]
-    print(f"Number of rows after price cleaning: {len(df)}")
+    # Remove extreme outliers using z-scores (values beyond 3 standard deviations)
+    df = df[abs(df['price_zscore']) <= 3]
+    print(f"\nPrice range after z-score filtering: ${df['price'].min():,.2f} - ${df['price'].max():,.2f}")
+    print(f"Number of rows after z-score filtering: {len(df)}")
+    
+    # Additional filtering using percentiles (remove top and bottom 1%)
+    lower_percentile = df['price'].quantile(0.01)
+    upper_percentile = df['price'].quantile(0.99)
+    df = df[(df['price'] >= lower_percentile) & (df['price'] <= upper_percentile)]
+    
+    print("\nFinal price statistics:")
+    print(f"Price range: ${df['price'].min():,.2f} - ${df['price'].max():,.2f}")
+    print(f"Number of rows after percentile filtering: {len(df)}")
+    
+    # Drop the temporary z-score column
+    df = df.drop('price_zscore', axis=1)
     
     # Convert dates
     df['leg_Departure_Date'] = pd.to_datetime(df['leg_Departure_Date'])
@@ -83,13 +94,58 @@ def clean_and_prepare_data(df):
     required_columns = ['aircraftModel', 'category', 'leg_Departure_Airport', 'leg_Arrival_Airport']
     df = df.dropna(subset=required_columns)
     
+    # Print unique categories before removal
+    print("\nCategories before removal:")
+    print(df['category'].unique())
+    
+    # Remove specified categories (case-insensitive)
+    categories_to_remove = ['Unknown', 'Airliner', 'Helicopter']
+    df['category_lower'] = df['category'].str.lower()
+    df = df[~df['category_lower'].isin([cat.lower() for cat in categories_to_remove])]
+    df = df.drop('category_lower', axis=1)
+    
+    print("\nCategories after removal:")
+    print(df['category'].unique())
+    print(f"Number of rows after removing specified categories: {len(df)}")
+    
     # Calculate distances between airports
     print("Calculating airport distances...")
     df['airport_distance'] = df.apply(
         lambda row: calculate_distance(row['leg_Departure_Airport'], row['leg_Arrival_Airport']),
         axis=1
     )
-
+    
+    # Remove rows with zero distance (invalid airport codes)
+    df = df[df['airport_distance'] > 0]
+    
+    # Create distance bins for more granular analysis
+    df['distance_bin'] = pd.qcut(df['airport_distance'], q=5, labels=['very_short', 'short', 'medium', 'long', 'very_long'])
+    
+    print("\nRemoving outliers by category and distance...")
+    # Group by category and distance bin to remove outliers within each group
+    filtered_dfs = []
+    for (category, distance_bin), group in df.groupby(['category', 'distance_bin']):
+        if len(group) > 10:  # Only process groups with enough data points
+            # Calculate z-scores for this group
+            mean_price = group['price'].mean()
+            std_price = group['price'].std()
+            group['price_zscore'] = (group['price'] - mean_price) / std_price
+            
+            # Remove outliers (beyond 2.5 standard deviations)
+            filtered_group = group[abs(group['price_zscore']) <= 2.5]
+            filtered_dfs.append(filtered_group.drop('price_zscore', axis=1))
+        else:
+            filtered_dfs.append(group)
+    
+    # Combine all filtered groups
+    df = pd.concat(filtered_dfs, ignore_index=True)
+    print(f"Number of rows after category and distance-based filtering: {len(df)}")
+    
+    # Print statistics by category and distance
+    print("\nPrice statistics by category and distance:")
+    stats_by_category = df.groupby(['category', 'distance_bin'])['price'].agg(['count', 'mean', 'std', 'min', 'max'])
+    print(stats_by_category)
+    
     # Holiday features
     us_holidays = holidays.US()
     df['is_holiday'] = df['leg_Departure_Date'].apply(lambda x: x in us_holidays)
@@ -99,9 +155,6 @@ def clean_and_prepare_data(df):
 
     # Route features
     df['route'] = df['leg_Departure_Airport'] + ' - ' + df['leg_Arrival_Airport']
-    
-    # Remove rows with zero distance (invalid airport codes)
-    df = df[df['airport_distance'] > 0]
     
     print(f"Data shape after cleaning: {df.shape}")
     return df
