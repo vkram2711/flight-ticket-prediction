@@ -3,50 +3,77 @@ import numpy as np
 from datetime import datetime
 import holidays
 from geopy.distance import geodesic
-import airportsdata
 import os
+import pickle
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-def get_airport_coordinates(airport_code):
-    """Get airport coordinates using airport code rules to determine the correct database."""
+def load_airport_data():
+    """Load airport data from merged_airports.csv."""
     try:
-        # Rule 1: If code contains numbers, it's a FAA LID
-        if any(char.isdigit() for char in airport_code):
-            airports = airportsdata.load('LID')
-            airport = airports.get(airport_code)
-            if airport:
-                return (airport['lat'], airport['lon'])
-            print(f"FAA LID {airport_code} not found in database")
-            return (0, 0)
-            
-        # Rule 2: If code is 4 letters, it's ICAO
-        if len(airport_code) == 4 and airport_code.isalpha():
-            airports = airportsdata.load('ICAO')
-            airport = airports.get(airport_code)
-            if airport:
-                return (airport['lat'], airport['lon'])
-            print(f"ICAO code {airport_code} not found in database")
-            return (0, 0)
-            
-        # Rule 3: If code is 3 letters, it's IATA
-        if len(airport_code) == 3 and airport_code.isalpha():
-            airports = airportsdata.load('IATA')
-            airport = airports.get(airport_code)
-            if airport:
-                return (airport['lat'], airport['lon'])
-            print(f"IATA code {airport_code} not found in database")
-            return (0, 0)
-            
-        print(f"Invalid airport code format: {airport_code}")
-        return (0, 0)
+        airports_df = pd.read_csv('merged_airports.csv')
+        # Create a dictionary for faster lookups
+        airports_dict = {}
+        for _, row in airports_df.iterrows():
+            airports_dict[row['code']] = {
+                'lat': row['latitude'],
+                'lon': row['longitude']
+            }
+        return airports_dict
     except Exception as e:
-        print(f"Error getting coordinates for {airport_code}: {str(e)}")
-        return (0, 0)
+        print(f"Error loading airport data: {str(e)}")
+        return {}
 
-def calculate_distance(departure_airport, arrival_airport):
+def calculate_distance(departure_airport, arrival_airport, airports_dict, distance_cache=None):
     """Calculate distance between two airports in kilometers."""
-    dep_coords = get_airport_coordinates(departure_airport)
-    arr_coords = get_airport_coordinates(arrival_airport)
-    return geodesic(dep_coords, arr_coords).kilometers
+    # Check if distance is in cache
+    if distance_cache is not None:
+        cache_key = f"{departure_airport}_{arrival_airport}"
+        if cache_key in distance_cache:
+            return distance_cache[cache_key]
+    
+    # Get coordinates from airports dictionary
+    dep_coords = airports_dict.get(departure_airport, {'lat': 0, 'lon': 0})
+    arr_coords = airports_dict.get(arrival_airport, {'lat': 0, 'lon': 0})
+    
+    # Calculate distance
+    distance = geodesic(
+        (dep_coords['lat'], dep_coords['lon']),
+        (arr_coords['lat'], arr_coords['lon'])
+    ).kilometers
+    
+    # Add to cache if cache is provided
+    if distance_cache is not None:
+        distance_cache[cache_key] = distance
+    
+    return distance
+
+def load_or_create_distance_cache():
+    """Load existing distance cache or create a new one."""
+    cache_file = 'cache/distance_cache.pkl'
+    
+    # Create cache directory if it doesn't exist
+    os.makedirs('cache', exist_ok=True)
+    
+    # Try to load existing cache
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'rb') as f:
+                print("Loading existing distance cache...")
+                return pickle.load(f)
+        except Exception as e:
+            print(f"Error loading cache: {str(e)}")
+    
+    # Create new cache if loading failed or file doesn't exist
+    print("Creating new distance cache...")
+    return {}
+
+def save_distance_cache(cache):
+    """Save distance cache to file."""
+    cache_file = 'cache/distance_cache.pkl'
+    with open(cache_file, 'wb') as f:
+        pickle.dump(cache, f)
+    print("Distance cache saved.")
 
 def clean_and_prepare_data(df):
     """Clean and prepare the data for model training."""
@@ -108,12 +135,24 @@ def clean_and_prepare_data(df):
     print(df['category'].unique())
     print(f"Number of rows after removing specified categories: {len(df)}")
     
+    # Load airport data and distance cache
+    airports_dict = load_airport_data()
+    distance_cache = load_or_create_distance_cache()
+    
     # Calculate distances between airports
     print("Calculating airport distances...")
     df['airport_distance'] = df.apply(
-        lambda row: calculate_distance(row['leg_Departure_Airport'], row['leg_Arrival_Airport']),
+        lambda row: calculate_distance(
+            row['leg_Departure_Airport'], 
+            row['leg_Arrival_Airport'],
+            airports_dict,
+            distance_cache
+        ),
         axis=1
     )
+    
+    # Save updated cache
+    save_distance_cache(distance_cache)
     
     # Remove rows with zero distance (invalid airport codes)
     df = df[df['airport_distance'] > 0]
@@ -159,6 +198,62 @@ def clean_and_prepare_data(df):
     print(f"Data shape after cleaning: {df.shape}")
     return df
 
+def plot_price_per_mile(df):
+    """Plot price per mile analysis for different categories."""
+    # Calculate price per mile
+    df['price_per_mile'] = df['price'] / df['airport_distance']
+    
+    # Get unique categories
+    categories = df['category'].unique()
+    
+    # Create a figure for each category
+    for category in categories:
+        # Filter data for this category
+        cat_data = df[df['category'] == category]
+        
+        # Create figure
+        plt.figure(figsize=(12, 6))
+        
+        # Create scatter plot
+        plt.scatter(cat_data['airport_distance'], cat_data['price_per_mile'], 
+                   alpha=0.5, label='Data points')
+        
+        # Add trend line
+        z = np.polyfit(cat_data['airport_distance'], cat_data['price_per_mile'], 1)
+        p = np.poly1d(z)
+        plt.plot(cat_data['airport_distance'], p(cat_data['airport_distance']), 
+                "r--", label='Trend line')
+        
+        # Customize plot
+        plt.title(f'Price per Mile vs Distance for {category}')
+        plt.xlabel('Distance (miles)')
+        plt.ylabel('Price per Mile ($/mile)')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Add statistics as text
+        stats = cat_data['price_per_mile'].describe()
+        stats_text = f"""
+        Mean: ${stats['mean']:.2f}/mile
+        Median: ${stats['50%']:.2f}/mile
+        Std Dev: ${stats['std']:.2f}/mile
+        Min: ${stats['min']:.2f}/mile
+        Max: ${stats['max']:.2f}/mile
+        """
+        plt.text(0.02, 0.98, stats_text,
+                transform=plt.gca().transAxes,
+                verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # Save plot
+        plt.tight_layout()
+        plt.savefig(f'processed_data/price_per_mile_{category.lower().replace(" ", "_")}.png')
+        plt.close()
+    
+    print("\nPrice per Mile Statistics by Category:")
+    stats = df.groupby('category')['price_per_mile'].agg(['mean', 'median', 'std', 'min', 'max'])
+    print(stats.round(2))
+
 def main():
     # Create output directory if it doesn't exist
     os.makedirs('processed_data', exist_ok=True)
@@ -170,6 +265,9 @@ def main():
     
     # Clean and prepare data
     df = clean_and_prepare_data(df)
+    
+    # Plot price per mile analysis
+    plot_price_per_mile(df)
     
     # Save processed data
     output_file = 'processed_data/model_input_data.csv'
