@@ -55,11 +55,7 @@ def prepare_training_data(df):
         'leg_Departure_Airport_encoded',
         'leg_Arrival_Airport_encoded',
         'route_encoded',
-        'airport_distance',
-
-        # Temporal features
-        'is_holiday',
-        'is_weekend'
+        'airport_distance'
     ]
 
     # Prepare X and y
@@ -87,14 +83,16 @@ def train_model(X, y):
         'n_estimators': [100, 200],
         'min_child_weight': [1, 3, 5],
         'subsample': [0.8, 0.9, 1.0],
-        'colsample_bytree': [0.8, 0.9, 1.0]
+        'colsample_bytree': [0.8, 0.9, 1.0],
+        'gamma': [0, 0.1, 0.2]  # Added gamma parameter for better handling of categorical features
     }
 
     # Create and train model
     xgb_model = xgb.XGBRegressor(
         objective='reg:squarederror',
         random_state=42,
-        n_jobs=-1
+        n_jobs=-1,
+        tree_method='hist'  # Using histogram-based algorithm for better performance
     )
 
     grid_search = GridSearchCV(

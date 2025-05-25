@@ -1,60 +1,19 @@
-import pandas as pd
-import numpy as np
-from datetime import datetime
-import holidays
-from geopy.distance import geodesic
 import os
 import pickle
+import holidays
 import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
+import pandas as pd
+from utils import load_airport_data, calculate_distance
 
-def load_airport_data():
-    """Load airport data from merged_airports.csv."""
-    try:
-        airports_df = pd.read_csv('merged_airports.csv')
-        # Create a dictionary for faster lookups
-        airports_dict = {}
-        for _, row in airports_df.iterrows():
-            airports_dict[row['code']] = {
-                'lat': row['latitude'],
-                'lon': row['longitude']
-            }
-        return airports_dict
-    except Exception as e:
-        print(f"Error loading airport data: {str(e)}")
-        return {}
-
-def calculate_distance(departure_airport, arrival_airport, airports_dict, distance_cache=None):
-    """Calculate distance between two airports in kilometers."""
-    # Check if distance is in cache
-    if distance_cache is not None:
-        cache_key = f"{departure_airport}_{arrival_airport}"
-        if cache_key in distance_cache:
-            return distance_cache[cache_key]
-    
-    # Get coordinates from airports dictionary
-    dep_coords = airports_dict.get(departure_airport, {'lat': 0, 'lon': 0})
-    arr_coords = airports_dict.get(arrival_airport, {'lat': 0, 'lon': 0})
-    
-    # Calculate distance
-    distance = geodesic(
-        (dep_coords['lat'], dep_coords['lon']),
-        (arr_coords['lat'], arr_coords['lon'])
-    ).kilometers
-    
-    # Add to cache if cache is provided
-    if distance_cache is not None:
-        distance_cache[cache_key] = distance
-    
-    return distance
 
 def load_or_create_distance_cache():
     """Load existing distance cache or create a new one."""
     cache_file = 'cache/distance_cache.pkl'
-    
+
     # Create cache directory if it doesn't exist
     os.makedirs('cache', exist_ok=True)
-    
+
     # Try to load existing cache
     if os.path.exists(cache_file):
         try:
@@ -63,10 +22,11 @@ def load_or_create_distance_cache():
                 return pickle.load(f)
         except Exception as e:
             print(f"Error loading cache: {str(e)}")
-    
+
     # Create new cache if loading failed or file doesn't exist
     print("Creating new distance cache...")
     return {}
+
 
 def save_distance_cache(cache):
     """Save distance cache to file."""
@@ -75,16 +35,36 @@ def save_distance_cache(cache):
         pickle.dump(cache, f)
     print("Distance cache saved.")
 
+
 def clean_and_prepare_data(df):
     """Clean and prepare the data for model training."""
     print("\nCleaning and preparing data...")
+    print(f"Initial data shape: {df.shape}")
+    
+    # Create a list to track removed rows
+    removed_rows_list = []
+    initial_count = len(df)
     
     # Convert price to numeric and handle any non-numeric values
     df['price'] = pd.to_numeric(df['price'], errors='coerce')
+    removed = df[df['price'].isna()]
+    if not removed.empty:
+        for _, row in removed.iterrows():
+            row_dict = row.to_dict()
+            row_dict['reason'] = 'Invalid price (non-numeric)'
+            removed_rows_list.append(row_dict)
+    df = df.dropna(subset=['price'])
+    print(f"Rows after price conversion: {len(df)}")
     
     # Remove rows with missing or invalid prices
-    df = df.dropna(subset=['price'])
+    removed = df[df['price'] <= 0]
+    if not removed.empty:
+        for _, row in removed.iterrows():
+            row_dict = row.to_dict()
+            row_dict['reason'] = 'Invalid price (zero or negative)'
+            removed_rows_list.append(row_dict)
     df = df[df['price'] > 0]
+    print(f"Rows after removing invalid prices: {len(df)}")
     
     # Calculate price statistics
     price_stats = df['price'].describe()
@@ -96,14 +76,26 @@ def clean_and_prepare_data(df):
     std_price = df['price'].std()
     df['price_zscore'] = (df['price'] - mean_price) / std_price
     
-    # Remove extreme outliers using z-scores (values beyond 3 standard deviations)
+    # Remove extreme outliers using z-scores
+    removed = df[abs(df['price_zscore']) > 3]
+    if not removed.empty:
+        for _, row in removed.iterrows():
+            row_dict = row.to_dict()
+            row_dict['reason'] = 'Price outlier (z-score > 3)'
+            removed_rows_list.append(row_dict)
     df = df[abs(df['price_zscore']) <= 3]
     print(f"\nPrice range after z-score filtering: ${df['price'].min():,.2f} - ${df['price'].max():,.2f}")
     print(f"Number of rows after z-score filtering: {len(df)}")
     
-    # Additional filtering using percentiles (remove top and bottom 1%)
+    # Additional filtering using percentiles
     lower_percentile = df['price'].quantile(0.01)
     upper_percentile = df['price'].quantile(0.99)
+    removed = df[(df['price'] < lower_percentile) | (df['price'] > upper_percentile)]
+    if not removed.empty:
+        for _, row in removed.iterrows():
+            row_dict = row.to_dict()
+            row_dict['reason'] = 'Price outside 1-99 percentile range'
+            removed_rows_list.append(row_dict)
     df = df[(df['price'] >= lower_percentile) & (df['price'] <= upper_percentile)]
     
     print("\nFinal price statistics:")
@@ -113,21 +105,30 @@ def clean_and_prepare_data(df):
     # Drop the temporary z-score column
     df = df.drop('price_zscore', axis=1)
     
-    # Convert dates
-    df['leg_Departure_Date'] = pd.to_datetime(df['leg_Departure_Date'])
-    df['leg_Arrival_Date'] = pd.to_datetime(df['leg_Arrival_Date'], errors='coerce')
-    
     # Remove rows with missing required fields
     required_columns = ['aircraftModel', 'category', 'leg_Departure_Airport', 'leg_Arrival_Airport']
+    removed = df[df[required_columns].isna().any(axis=1)]
+    if not removed.empty:
+        for _, row in removed.iterrows():
+            row_dict = row.to_dict()
+            row_dict['reason'] = 'Missing required fields'
+            removed_rows_list.append(row_dict)
     df = df.dropna(subset=required_columns)
+    print(f"Rows after removing missing required fields: {len(df)}")
     
     # Print unique categories before removal
     print("\nCategories before removal:")
     print(df['category'].unique())
     
-    # Remove specified categories (case-insensitive)
+    # Remove specified categories
     categories_to_remove = ['Unknown', 'Airliner', 'Helicopter']
     df['category_lower'] = df['category'].str.lower()
+    removed = df[df['category_lower'].isin([cat.lower() for cat in categories_to_remove])]
+    if not removed.empty:
+        for _, row in removed.iterrows():
+            row_dict = row.to_dict()
+            row_dict['reason'] = f'Removed categories: {", ".join(categories_to_remove)}'
+            removed_rows_list.append(row_dict)
     df = df[~df['category_lower'].isin([cat.lower() for cat in categories_to_remove])]
     df = df.drop('category_lower', axis=1)
     
@@ -135,102 +136,164 @@ def clean_and_prepare_data(df):
     print(df['category'].unique())
     print(f"Number of rows after removing specified categories: {len(df)}")
     
-    # Load airport data and distance cache
-    airports_dict = load_airport_data()
-    distance_cache = load_or_create_distance_cache()
+    # Load airport data
+    airports_df = load_airport_data()
+    print(f"Loaded {len(airports_df)} airports from CSV")
     
     # Calculate distances between airports
-    print("Calculating airport distances...")
+    print("\nCalculating airport distances...")
     df['airport_distance'] = df.apply(
         lambda row: calculate_distance(
             row['leg_Departure_Airport'], 
             row['leg_Arrival_Airport'],
-            airports_dict,
-            distance_cache
+            airports_df
         ),
         axis=1
     )
     
-    # Save updated cache
-    save_distance_cache(distance_cache)
-    
     # Remove rows with zero distance (invalid airport codes)
+    removed = df[df['airport_distance'] == 0]
+    if not removed.empty:
+        for _, row in removed.iterrows():
+            row_dict = row.to_dict()
+            row_dict['reason'] = 'Invalid airport codes (distance = 0)'
+            removed_rows_list.append(row_dict)
     df = df[df['airport_distance'] > 0]
+    print(f"Rows after removing invalid distances: {len(df)}")
     
-    # Create distance bins for more granular analysis
-    df['distance_bin'] = pd.qcut(df['airport_distance'], q=5, labels=['very_short', 'short', 'medium', 'long', 'very_long'])
+    # Calculate price per mile
+    df['price_per_mile'] = df['price'] / df['airport_distance']
     
-    print("\nRemoving outliers by category and distance...")
-    # Group by category and distance bin to remove outliers within each group
-    filtered_dfs = []
-    for (category, distance_bin), group in df.groupby(['category', 'distance_bin']):
-        if len(group) > 10:  # Only process groups with enough data points
-            # Calculate z-scores for this group
-            mean_price = group['price'].mean()
-            std_price = group['price'].std()
-            group['price_zscore'] = (group['price'] - mean_price) / std_price
-            
-            # Remove outliers (beyond 2.5 standard deviations)
-            filtered_group = group[abs(group['price_zscore']) <= 2.5]
-            filtered_dfs.append(filtered_group.drop('price_zscore', axis=1))
-        else:
-            filtered_dfs.append(group)
+    # Remove extreme price per mile values by category
+    print("\nRemoving extreme price per mile values by category...")
+    for category in df['category'].unique():
+        cat_data = df[df['category'] == category]
+        lower_percentile = cat_data['price_per_mile'].quantile(0.01)
+        upper_percentile = cat_data['price_per_mile'].quantile(0.99)
+        
+        removed = df[(df['category'] == category) & 
+                    ((df['price_per_mile'] < lower_percentile) | 
+                     (df['price_per_mile'] > upper_percentile))]
+        
+        if not removed.empty:
+            for _, row in removed.iterrows():
+                row_dict = row.to_dict()
+                row_dict['reason'] = f'Extreme price per mile for {category}'
+                removed_rows_list.append(row_dict)
+        
+        df = df[~((df['category'] == category) & 
+                  ((df['price_per_mile'] < lower_percentile) | 
+                   (df['price_per_mile'] > upper_percentile)))]
     
-    # Combine all filtered groups
-    df = pd.concat(filtered_dfs, ignore_index=True)
-    print(f"Number of rows after category and distance-based filtering: {len(df)}")
+    print(f"Number of rows after removing extreme price per mile values: {len(df)}")
     
-    # Print statistics by category and distance
-    print("\nPrice statistics by category and distance:")
-    stats_by_category = df.groupby(['category', 'distance_bin'])['price'].agg(['count', 'mean', 'std', 'min', 'max'])
-    print(stats_by_category)
+    # Create distance bins by category
+    print("\nCreating distance bins by category...")
+    distance_bins = {
+        'Piston': [0, 500, 1000, 1500, 2000],
+        'Turbo prop': [0, 500, 1000, 1500, 2000],
+        'Light jet': [0, 1000, 2000, 3000, 4000],
+        'Entry level jet (VLJ)': [0, 1000, 2000, 3000, 4000],
+        'Super light jet': [0, 1000, 2000, 3000, 4000],
+        'Midsize jet': [0, 1500, 3000, 4500, 6000],
+        'Super midsize jet': [0, 1500, 3000, 4500, 6000],
+        'Ultra long range': [0, 2000, 4000, 6000, 8000],
+        'Heavy jet': [0, 2000, 4000, 6000, 8000]
+    }
     
-    # Holiday features
-    us_holidays = holidays.US()
-    df['is_holiday'] = df['leg_Departure_Date'].apply(lambda x: x in us_holidays)
-
-    # Weekend features
-    df['is_weekend'] = df['leg_Departure_Date'].dt.dayofweek.isin([5, 6])
-
+    df['distance_bin'] = df.apply(
+        lambda row: pd.cut(
+            [row['airport_distance']], 
+            bins=distance_bins[row['category']], 
+            labels=[f'bin_{i+1}' for i in range(len(distance_bins[row['category']])-1)]
+        )[0],
+        axis=1
+    )
+    
+    # Apply distance restrictions based on category
+    print("\nApplying distance restrictions by category...")
+    
+    # First remove all flights shorter than 100 miles
+    removed = df[df['airport_distance'] < 100]
+    if not removed.empty:
+        for _, row in removed.iterrows():
+            row_dict = row.to_dict()
+            row_dict['reason'] = 'Distance less than 100 miles'
+            removed_rows_list.append(row_dict)
+    df = df[df['airport_distance'] >= 100]
+    print(f"Number of rows after removing flights < 100 miles: {len(df)}")
+    
+    # Apply category-specific distance limits
+    category_limits = {
+        'Piston': 2000,
+        'Turboprop': 2000,
+        'Light Jet': 4000,
+        'Entry level jet (VLJ)': 4000,
+        'Super light jet': 4000,
+        'Midsize': 6000,
+        'Super midsize jet': 6000
+        # Ultralong and Heavy have no limits
+    }
+    
+    # Filter by category limits
+    for category, limit in category_limits.items():
+        removed = df[(df['category'] == category) & (df['airport_distance'] > limit)]
+        if not removed.empty:
+            for _, row in removed.iterrows():
+                row_dict = row.to_dict()
+                row_dict['reason'] = f'{category} flights exceeding {limit} miles'
+                removed_rows_list.append(row_dict)
+        df = df[~((df['category'] == category) & (df['airport_distance'] > limit))]
+    
+    print(f"Number of rows after applying category distance limits: {len(df)}")
+    
     # Route features
     df['route'] = df['leg_Departure_Airport'] + ' - ' + df['leg_Arrival_Airport']
     
-    print(f"Data shape after cleaning: {df.shape}")
+    print(f"\nFinal data shape after cleaning: {df.shape}")
+    
+    # Convert removed rows list to DataFrame and save
+    removed_rows_df = pd.DataFrame(removed_rows_list)
+    if not removed_rows_df.empty:
+        removed_rows_df.to_csv('processed_data/removed_rows.csv', index=False)
+        print(f"\nRemoved {len(removed_rows_df)} rows. Details saved to processed_data/removed_rows.csv")
+    
     return df
+
 
 def plot_price_per_mile(df):
     """Plot price per mile analysis for different categories."""
     # Calculate price per mile
     df['price_per_mile'] = df['price'] / df['airport_distance']
-    
+
     # Get unique categories
     categories = df['category'].unique()
-    
+
     # Create a figure for each category
     for category in categories:
         # Filter data for this category
         cat_data = df[df['category'] == category]
-        
+
         # Create figure
         plt.figure(figsize=(12, 6))
-        
+
         # Create scatter plot
-        plt.scatter(cat_data['airport_distance'], cat_data['price_per_mile'], 
-                   alpha=0.5, label='Data points')
-        
+        plt.scatter(cat_data['airport_distance'], cat_data['price_per_mile'],
+                    alpha=0.5, label='Data points')
+
         # Add trend line
         z = np.polyfit(cat_data['airport_distance'], cat_data['price_per_mile'], 1)
         p = np.poly1d(z)
-        plt.plot(cat_data['airport_distance'], p(cat_data['airport_distance']), 
-                "r--", label='Trend line')
-        
+        plt.plot(cat_data['airport_distance'], p(cat_data['airport_distance']),
+                 "r--", label='Trend line')
+
         # Customize plot
         plt.title(f'Price per Mile vs Distance for {category}')
         plt.xlabel('Distance (miles)')
         plt.ylabel('Price per Mile ($/mile)')
         plt.legend()
         plt.grid(True, alpha=0.3)
-        
+
         # Add statistics as text
         stats = cat_data['price_per_mile'].describe()
         stats_text = f"""
@@ -241,18 +304,19 @@ def plot_price_per_mile(df):
         Max: ${stats['max']:.2f}/mile
         """
         plt.text(0.02, 0.98, stats_text,
-                transform=plt.gca().transAxes,
-                verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
+                 transform=plt.gca().transAxes,
+                 verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
         # Save plot
         plt.tight_layout()
         plt.savefig(f'processed_data/price_per_mile_{category.lower().replace(" ", "_")}.png')
         plt.close()
-    
+
     print("\nPrice per Mile Statistics by Category:")
     stats = df.groupby('category')['price_per_mile'].agg(['mean', 'median', 'std', 'min', 'max'])
     print(stats.round(2))
+
 
 def main():
     # Create output directory if it doesn't exist
@@ -262,18 +326,18 @@ def main():
     print("Loading data...")
     df = pd.read_csv('CleanOne.csv')
     print(f"Original data shape: {df.shape}")
-    
+
     # Clean and prepare data
     df = clean_and_prepare_data(df)
-    
+
     # Plot price per mile analysis
     plot_price_per_mile(df)
-    
+
     # Save processed data
     output_file = 'processed_data/model_input_data.csv'
     df.to_csv(output_file, index=False)
     print(f"\nProcessed data saved to {output_file}")
-    
+
     # Print some statistics
     print("\nData Statistics:")
     print(f"Total number of records: {len(df)}")
@@ -287,10 +351,11 @@ def main():
     print(f"Departure Airports: {df['leg_Departure_Airport'].nunique()}")
     print(f"Arrival Airports: {df['leg_Arrival_Airport'].nunique()}")
     print(f"Routes: {df['route'].nunique()}")
-    
+
     # Print sample of processed data
     print("\nSample of processed data:")
-    print(df[['aircraftModel', 'category', 'price', 'airport_distance', 'is_holiday', 'is_weekend']].head())
+    print(df[['aircraftModel', 'category', 'price', 'airport_distance']].head())
+
 
 if __name__ == "__main__":
-    main() 
+    main()
