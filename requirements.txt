@@ -8,3 +8,5 @@ holidays>=0.14
 geopy>=2.2.0
 streamlit>=1.22.0
 airportsdata
+openai>=1.0.0
+shap

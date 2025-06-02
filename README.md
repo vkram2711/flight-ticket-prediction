@@ -60,7 +60,7 @@ python train_model.py
 
 2. Run the web application:
 ```bash
-streamlit run app.py
+streamlit run demo.py
 ```
 
 3. Open your web browser and navigate to the URL shown in the terminal (typically http://localhost:8501)
