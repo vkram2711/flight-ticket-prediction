@@ -44,5 +44,30 @@ def calculate_distance(departure_airport, arrival_airport, airports_df):
     arr_coords = (arr_airport.iloc[0]['lat'], arr_airport.iloc[0]['lon'])
 
     # Calculate distance
-    distance = geodesic(dep_coords, arr_coords).kilometers
+    distance = geodesic(dep_coords, arr_coords).nm
     return distance
+
+
+def check_airport_code(airport_code, airports_df):
+    """
+    Check if an airport code exists in the airports dataframe.
+    
+    Args:
+        airport_code (str): The airport code to check (can be IATA, ICAO, or LID)
+        airports_df (pandas.DataFrame): DataFrame containing airport information
+        
+    Returns:
+        bool: True if the airport code exists, False otherwise
+    """
+
+    if airports_df is None:
+        return False
+        
+    # Check if the code exists in any of the identifier columns
+    exists = airports_df[
+        (airports_df['lid'] == airport_code) |
+        (airports_df['iata'] == airport_code) |
+        (airports_df['icao'] == airport_code)
+    ].shape[0] > 0
+    
+    return exists

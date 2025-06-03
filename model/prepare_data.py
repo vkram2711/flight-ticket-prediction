@@ -242,15 +242,15 @@ def clean_and_prepare_data(df):
     # Create distance bins by category
     print("\nCreating distance bins by category...")
     distance_bins = {
-        'Piston': [0, 500, 1000, 1500, 2000],
-        'Turbo prop': [0, 500, 1000, 1500, 2000],
-        'Light jet': [0, 1000, 2000, 3000, 4000],
-        'Entry level jet (VLJ)': [0, 1000, 2000, 3000, 4000],
-        'Super light jet': [0, 1000, 2000, 3000, 4000],
-        'Midsize jet': [0, 1500, 3000, 4500, 6000],
-        'Super midsize jet': [0, 1500, 3000, 4500, 6000],
-        'Ultra long range': [0, 2000, 4000, 6000, 8000],
-        'Heavy jet': [0, 2000, 4000, 6000, 8000]
+        'Piston': [0, 270, 540, 810, 1080],
+        'Turbo prop': [0, 270, 540, 810, 1080],
+        'Light jet': [0, 540, 1080, 1620, 2160],
+        'Entry level jet (VLJ)': [0, 540, 1080, 1620, 2160],
+        'Super light jet': [0, 540, 1080, 1620, 2160],
+        'Midsize jet': [0, 810, 1620, 2430, 3240],
+        'Super midsize jet': [0, 810, 1620, 2430, 3240],
+        'Ultra long range': [0, 1080, 2160, 3240, 4320],
+        'Heavy jet': [0, 1080, 2160, 3240, 4320]
     }
     
     df['distance_bin'] = df.apply(
@@ -265,15 +265,15 @@ def clean_and_prepare_data(df):
     # Apply distance restrictions based on category
     print("\nApplying distance restrictions by category...")
     
-    # First remove all flights shorter than 100 miles
-    removed = df[df['airport_distance'] < 100]
+    # First remove all flights shorter than 55 miles
+    removed = df[df['airport_distance'] < 55]
     if not removed.empty:
         for _, row in removed.iterrows():
             row_dict = row.to_dict()
-            row_dict['reason'] = 'Distance less than 100 miles'
+            row_dict['reason'] = 'Distance less than 55 miles'
             removed_rows_list.append(row_dict)
-    df = df[df['airport_distance'] >= 100]
-    print(f"Number of rows after removing flights < 100 miles: {len(df)}")
+    df = df[df['airport_distance'] >= 55]
+    print(f"Number of rows after removing flights < 55 miles: {len(df)}")
     
     # Filter by category limits
     for category, limit in CATEGORY_LIMITS.items():

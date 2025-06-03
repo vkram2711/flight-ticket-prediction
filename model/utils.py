@@ -1,21 +1,34 @@
 import os
 import pickle
-import streamlit as st
+
 # Constants
 MODEL_DIR = '../model/model_files'
 VISUALIZATIONS_DIR = '../visualizations'
 
-# Category distance limits in kilometers
+CATEGORIES = [
+    'Piston',
+    'Turbo prop',
+    'Light jet',
+    'Entry level jet (VLJ)',
+    'Super light jet',
+    'Midsize jet',
+    'Super midsize jet',
+    'Heavy jet',
+    'Ultra long range'
+]
+
+# Category distance limits in nautical miles
 CATEGORY_LIMITS = {
-    'Piston': 2000,
-    'Turboprop': 2000,
-    'Light Jet': 4000,
-    'Entry level jet (VLJ)': 4000,
-    'Super light jet': 4000,
-    'Midsize': 6000,
-    'Super midsize jet': 6000
+    'Piston': 1000,
+    'Turbo prop': 1000,
+    'Light jet': 2150,
+    'Entry level jet (VLJ)': 2150,
+    'Super light jet': 2150,
+    'Midsize jet': 3200,
+    'Super midsize jet': 3200
     # Ultralong and Heavy have no limits
 }
+
 
 def load_model_components():
     """Load all model components."""
