@@ -13,8 +13,6 @@ app = Flask(__name__)
 MODEL_DIR = '../model/model_files'
 
 
-
-
 def validate_airports(dep_airport, arr_airport, airports_df):
     """Validate that airports exist in the database."""
     if dep_airport not in airports_df['IATA'].values:
@@ -23,6 +21,7 @@ def validate_airports(dep_airport, arr_airport, airports_df):
         raise ValueError(f"Arrival airport '{arr_airport}' not found in database")
     if dep_airport == arr_airport:
         raise ValueError("Departure and arrival airports cannot be the same")
+
 
 def validate_category_distance(category, distance):
     """Validate that the distance is within category limits."""

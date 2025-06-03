@@ -45,6 +45,58 @@ def clean_and_prepare_data(df):
     removed_rows_list = []
     initial_count = len(df)
     
+    # Remove duplicates based on similar quotes
+    print("\nRemoving duplicate quotes...")
+    # Convert quoteDate to datetime
+    df['quoteDate'] = pd.to_datetime(df['quoteDate'])
+    # Sort by quoteDate to ensure we process in chronological order
+    df = df.sort_values('quoteDate')
+    
+    # Create a key for identifying potential duplicates (excluding time)
+    def create_duplicate_key(row):
+        # Base key components that are always present
+        key_parts = [
+            str(row['aircraftModel']),
+            str(row['leg_Departure_Airport']),
+            str(row['leg_Arrival_Airport']),
+            str(row['price'])
+        ]
+        # Add tailNumber only if it's present and not empty
+        if pd.notna(row['tailNumber']) and str(row['tailNumber']).strip():
+            key_parts.append(str(row['tailNumber']))
+        return '_'.join(key_parts)
+    
+    df['duplicate_key'] = df.apply(create_duplicate_key, axis=1)
+    
+    # Find duplicates within 5-minute windows
+    duplicates = []
+    for key in df['duplicate_key'].unique():
+        # Get all rows with this key
+        key_rows = df[df['duplicate_key'] == key].copy()
+        if len(key_rows) > 1:
+            # Sort by time
+            key_rows = key_rows.sort_values('quoteDate')
+            # Get the first row's time
+            first_time = key_rows.iloc[0]['quoteDate']
+            # Find rows within 5 minutes of the first row
+            time_diff = (key_rows['quoteDate'] - first_time).dt.total_seconds() / 60
+            # Keep only the first row, mark others as duplicates
+            duplicates.extend(key_rows[time_diff <= 5].iloc[1:].index.tolist())
+    
+    # Record and remove duplicates
+    if duplicates:
+        for idx in duplicates:
+            row_dict = df.loc[idx].to_dict()
+            row_dict['reason'] = 'Duplicate quote (same aircraft, route, price, within 5 minutes)'
+            removed_rows_list.append(row_dict)
+        
+        df = df.drop(duplicates)
+        print(f"Removed {len(duplicates)} duplicate quotes")
+    
+    # Remove the temporary duplicate_key column
+    df = df.drop('duplicate_key', axis=1)
+    print(f"Rows after removing duplicates: {len(df)}")
+    
     # Convert price to numeric and handle any non-numeric values
     df['price'] = pd.to_numeric(df['price'], errors='coerce')
     removed = df[df['price'].isna()]

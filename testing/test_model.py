@@ -29,8 +29,11 @@ def create_features(input_data, encoders, airports_df):
                 features[f'{col}_encoded'] = encoders[col].transform([input_data[col]])[0]
             except ValueError as e:
                 if 'unseen' in str(e):
-                    raise ValueError(f"Unseen value for {col}: {input_data[col]}")
-                raise e
+                    print(f"Warning: Unseen value for {col}: {input_data[col]}")
+                    # Use a default encoding for unseen values
+                    features[f'{col}_encoded'] = 0
+                else:
+                    raise e
 
     # Calculate airport distance
     distance = calculate_distance(
@@ -48,6 +51,7 @@ def create_features(input_data, encoders, airports_df):
         features['route_encoded'] = encoders['route'].transform([route])[0]
     except ValueError:
         # If route is not in training data, use a default encoding
+        print(f"Warning: Unseen route: {route}")
         features['route_encoded'] = 0
 
     return features
@@ -62,20 +66,24 @@ def test_model_predictions(model, scaler, encoders, route_stats_df, airports_df,
     print(route_stats_df.columns.tolist())
     
     # Verify required columns exist
-    required_columns = ['route', 'avg_price', 'flight_count']
+    required_columns = ['route', 'mean_price', 'sample_count']
     missing_columns = [col for col in required_columns if col not in route_stats_df.columns]
     if missing_columns:
         raise ValueError(f"Missing required columns in route statistics: {missing_columns}")
 
-    for _, route_data in route_stats_df.iterrows():
+    print(f"\nProcessing {len(route_stats_df)} routes...")
+    successful_predictions = 0
+    failed_predictions = 0
+
+    for idx, route_data in route_stats_df.iterrows():
         try:
             # Split route into departure and arrival airports
             dep_airport, arr_airport = route_data['route'].split(' - ')
 
             # Create input data with default values
             input_data = {
-                'aircraftModel': 'Unknown',  # Default value
-                'category': 'Unknown',       # Default value
+                'aircraftModel': route_data['aircraft_model'],  # Use actual aircraft model from route stats
+                'category': route_data['category'],             # Use actual category from route stats
                 'leg_Departure_Airport': dep_airport,
                 'leg_Arrival_Airport': arr_airport
             }
@@ -95,7 +103,7 @@ def test_model_predictions(model, scaler, encoders, route_stats_df, airports_df,
             predicted_price = np.expm1(log_prediction)  # Transform back from log
 
             # Calculate deviation from average price
-            avg_price = route_data['avg_price']
+            avg_price = route_data['mean_price']
             deviation = ((predicted_price - avg_price) / avg_price) * 100
 
             results.append({
@@ -105,15 +113,21 @@ def test_model_predictions(model, scaler, encoders, route_stats_df, airports_df,
                 'avg_price': avg_price,
                 'predicted_price': predicted_price,
                 'deviation_percent': deviation,
-                'flight_count': route_data['flight_count']
+                'flight_count': route_data['sample_count']
             })
+            successful_predictions += 1
 
         except Exception as e:
+            failed_predictions += 1
             print(f"Error processing route {route_data['route']}: {str(e)}")
             continue
 
+    print(f"\nPrediction Summary:")
+    print(f"Successful predictions: {successful_predictions}")
+    print(f"Failed predictions: {failed_predictions}")
+
     if not results:
-        raise ValueError("No valid predictions were generated")
+        raise ValueError("No valid predictions were generated. Check the error messages above for details.")
 
     return pd.DataFrame(results)
 
