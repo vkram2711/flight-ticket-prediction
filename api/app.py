@@ -100,6 +100,7 @@ CATEGORY_MODELS = {
     'Ultra long range': ['Gulfstream G550', 'Global 6500', 'Falcon 7X']
 }
 
+
 @app.route('/predict', methods=['POST'])
 def predict():
     """API endpoint for price prediction."""
@@ -126,7 +127,7 @@ def predict():
             }), 400
         predictions = []
         distance = None
-        if input_data['category'] in CATEGORIES:
+        if not input_data['category'] in CATEGORIES:
             return jsonify({
                 'error': f'Invalid category: {input_data['category']}',
                 'available_categories': CATEGORIES
@@ -151,13 +152,13 @@ def predict():
 
             # Prepare response
             predictions.append({
-                'predicted_price': float(predicted_price),
+                'predicted_price': round(float(predicted_price), 2),
                 'aircraft_model': aircraftModel,
             })
         del input_data['aircraftModel']
 
         response = {
-            "distance_nm": distance,
+            "distance_nm": round(float(distance), 2),
             "predictions": predictions
         }
         return jsonify(response)
@@ -167,6 +168,7 @@ def predict():
     #except Exception as e:
     #    app.logger.error(f"Unexpected error: {str(e)}")
     #    return jsonify({'error': 'An unexpected error occurred'}), 500
+
 
 @app.route('/health', methods=['GET'])
 def health_check():

@@ -10,3 +10,5 @@ streamlit>=1.22.0
 airportsdata
 openai>=1.0.0
 shap
+SQLAlchemy>=2.0.0
+PyMySQL>=1.1.0
