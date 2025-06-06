@@ -16,7 +16,7 @@ Version: 1.0
 """
 
 from flask import Flask, request, jsonify
-from flask_restx import Api, Resource, fields
+from flask_restx import Api, Resource
 import pandas as pd
 import numpy as np
 
@@ -27,6 +27,7 @@ from airport_utils.utils import (
     get_airports_by_country
 )
 from model.utils import CATEGORY_LIMITS, load_model_components, CATEGORIES
+from docs import init_docs
 
 # Initialize Flask application
 app = Flask(__name__)
@@ -59,100 +60,8 @@ api = Api(
 # Create namespaces
 ns = api.namespace('api', description='Flight prediction operations')
 
-# Define models for request/response documentation
-prediction_request = api.model('PredictionRequest', {
-    'category': fields.String(
-        required=True,
-        description='Aircraft category (e.g., "Light jet", "Heavy jet")',
-        enum=list(CATEGORIES),
-        example='Light jet'
-    ),
-    'leg_Departure_Airport': fields.String(
-        required=True,
-        description='IATA code of the departure airport (e.g., "JFK", "LAX")',
-        example='JFK'
-    ),
-    'leg_Arrival_Airport': fields.String(
-        required=True,
-        description='IATA code of the arrival airport (e.g., "LAX", "SFO")',
-        example='LAX'
-    )
-})
-
-prediction_response = api.model('PredictionResponse', {
-    'distance_nm': fields.Float(
-        description='Distance between airports in nautical miles',
-        example=2475.5
-    ),
-    'predictions': fields.List(
-        fields.Nested(api.model('Prediction', {
-            'predicted_price': fields.Float(
-                description='Predicted price for the flight',
-                example=15000.00
-            ),
-            'aircraft_model': fields.String(
-                description='Specific aircraft model used for prediction',
-                example='Citation II'
-            )
-        }))
-    )
-})
-
-error_response = api.model('ErrorResponse', {
-    'error': fields.String(
-        description='Detailed error message explaining what went wrong',
-        example='Invalid airport code: XYZ'
-    ),
-    'missing_fields': fields.List(
-        fields.String,
-        description='List of required fields that were not provided',
-        example=['category', 'leg_Departure_Airport']
-    ),
-    'invalid_fields': fields.List(
-        fields.String,
-        description='List of fields with invalid values',
-        example=['category']
-    )
-})
-
-health_response = api.model('HealthResponse', {
-    'status': fields.String(
-        description='Current health status of the API',
-        example='healthy'
-    ),
-    'model_loaded': fields.Boolean(
-        description='Whether the prediction model is successfully loaded',
-        example=True
-    ),
-    'airports_loaded': fields.Boolean(
-        description='Whether the airport database is successfully loaded',
-        example=True
-    )
-})
-
-airports_response = api.model('AirportsResponse', {
-    'airports': fields.List(
-        fields.Nested(api.model('Airport', {
-            'icao': fields.String(description='ICAO code'),
-            'iata': fields.String(description='IATA code'),
-            'name': fields.String(description='Airport name'),
-            'city': fields.String(description='City'),
-            'country': fields.String(description='Country')
-        }))
-    )
-})
-
-categories_response = api.model('CategoriesResponse', {
-    'categories': fields.List(
-        fields.String,
-        description='List of all available aircraft categories',
-        example=['Light jet', 'Heavy jet', 'Midsize jet']
-    ),
-    'distance_limits': fields.Raw(
-        description='Maximum allowed distance (in km) for each aircraft category',
-        example={'Light jet': 2000, 'Heavy jet': 5000}
-    )
-})
+# Initialize API documentation and models
+models = init_docs(api)
 
 # Constants
 MODEL_DIR = '../model/model_files'
@@ -270,9 +179,9 @@ CATEGORY_MODELS = {
 
 @ns.route('/predict')
 class Prediction(Resource):
-    @ns.expect(prediction_request)
-    @ns.response(200, 'Success', prediction_response)
-    @ns.response(400, 'Bad Request', error_response)
+    @ns.expect(models['prediction_request'])
+    @ns.response(200, 'Success', models['prediction_response'])
+    @ns.response(400, 'Bad Request', models['error_response'])
     def post(self):
         """
         Make a price prediction for a flight route.
@@ -353,7 +262,7 @@ class Prediction(Resource):
 
 @ns.route('/health')
 class Health(Resource):
-    @ns.response(200, 'Success', health_response)
+    @ns.response(200, 'Success', models['health_response'])
     def get(self):
         """
         Check API health status.
@@ -372,7 +281,7 @@ class Health(Resource):
 
 @ns.route('/airports')
 class Airports(Resource):
-    @ns.response(200, 'Success', airports_response)
+    @ns.response(200, 'Success', models['airports_response'])
     def get(self):
         """
         List all available airports.
@@ -389,7 +298,7 @@ class Airports(Resource):
 
 @ns.route('/categories')
 class Categories(Resource):
-    @ns.response(200, 'Success', categories_response)
+    @ns.response(200, 'Success', models['categories_response'])
     def get(self):
         """
         List all available aircraft categories and their distance limits.
