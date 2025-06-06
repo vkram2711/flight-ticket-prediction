@@ -11,6 +11,8 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.inspection import permutation_importance
+from config.database import get_db
+from model.db_operations import get_all_flights
 
 # Get the absolute path to the model directory
 MODEL_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -331,17 +333,19 @@ def main():
     # Create output directories
     create_output_dirs()
 
-    # Load preprocessed data
-    print("Loading preprocessed data...")
+    # Load data from database
+    print("Loading data from model_input_flights table...")
     try:
-        # Get the absolute path to the model directory
-        model_dir = os.path.dirname(os.path.abspath(__file__))
-        input_file = os.path.join(model_dir, 'processed_data', 'model_input_data.csv')
-        df = pd.read_csv(input_file)
-        print(f"Loaded {len(df)} records")
-    except FileNotFoundError:
-        print(f"Error: Could not find {input_file}")
-        print("Please make sure the file exists in the processed_data directory.")
+        # Get database session
+        db = next(get_db())
+        try:
+            # Load data from model_input_flights table
+            df = get_all_flights(db)
+            print(f"Loaded {len(df)} records from database")
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"Error loading data from database: {str(e)}")
         return
 
     # Encode features

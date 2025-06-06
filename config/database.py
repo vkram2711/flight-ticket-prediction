@@ -1,26 +1,35 @@
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.pool import QueuePool
+from dotenv import load_dotenv
 
-# Database configuration
-DB_USER = 'pivatejet'
-DB_PASSWORD = 'Cegth13#Ctrhtn'
-DB_HOST = '146.190.38.49'
-DB_PORT = '3306'
-DB_NAME = 'jsonharvester_new'
+# Load environment variables from .env file
+load_dotenv()
 
-# Create SQLAlchemy engine
+# Database configuration from environment variables
+DB_USER = os.getenv('DB_USER')
+DB_PASSWORD = os.getenv('DB_PASSWORD')
+DB_HOST = os.getenv('DB_HOST')
+DB_PORT = os.getenv('DB_PORT', '3306')
+DB_NAME = os.getenv('DB_NAME')
+
 DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-engine = create_engine(DATABASE_URL)
+engine = create_engine(
+    DATABASE_URL,
+    poolclass=QueuePool,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True
+)
 
-# Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Create base class for models
 Base = declarative_base()
 
 def get_db():
-    """Get database session."""
     db = SessionLocal()
     try:
         yield db

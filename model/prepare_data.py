@@ -3,8 +3,12 @@ import pickle
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sqlalchemy.orm import Session
 from airport_utils.utils import load_airport_data, calculate_distance
+from config.harvester_db import get_harvester_db
+from config.database import get_db
 from model.utils import CATEGORY_LIMITS
+from model.db_operations import create_tables, save_to_database, load_clean_one_data
 
 
 def load_or_create_distance_cache():
@@ -36,7 +40,7 @@ def save_distance_cache(cache):
     print("Distance cache saved.")
 
 
-def clean_and_prepare_data(df):
+def clean_and_prepare_data(df, db: Session):
     """Clean and prepare the data for model training."""
     print("\nCleaning and preparing data...")
     print(f"Initial data shape: {df.shape}")
@@ -187,18 +191,13 @@ def clean_and_prepare_data(df):
     print("\nCategories after removal:")
     print(df['category'].unique())
     print(f"Number of rows after removing specified categories: {len(df)}")
-    
-    # Load airport data
-    airports_df = load_airport_data()
-    print(f"Loaded {len(airports_df)} airports from CSV")
-    
+
     # Calculate distances between airports
     print("\nCalculating airport distances...")
     df['airport_distance'] = df.apply(
         lambda row: calculate_distance(
             row['leg_Departure_Airport'], 
             row['leg_Arrival_Airport'],
-            airports_df
         ),
         axis=1
     )
@@ -292,11 +291,8 @@ def clean_and_prepare_data(df):
     
     print(f"\nFinal data shape after cleaning: {df.shape}")
     
-    # Convert removed rows list to DataFrame and save
-    removed_rows_df = pd.DataFrame(removed_rows_list)
-    if not removed_rows_df.empty:
-        removed_rows_df.to_csv('processed_data/removed_rows.csv', index=False)
-        print(f"\nRemoved {len(removed_rows_df)} rows. Details saved to processed_data/removed_rows.csv")
+    # Instead of saving to CSV, save to database
+    save_to_database(df, removed_rows_list, db)
     
     return df
 
@@ -319,37 +315,44 @@ def plot_price_per_mile(df):
 
 
 def main():
+    # Create database tables in the main database
+    create_tables()
+    
     # Create output directory if it doesn't exist
     os.makedirs('processed_data', exist_ok=True)
     
-    # Load the data
-    print("Loading data...")
-    df = pd.read_csv('../CleanOne.csv')
+    # Get both database sessions
+    harvester_db = next(get_harvester_db())
+    main_db = next(get_db())
     
-    # Clean and prepare the data
-    df = clean_and_prepare_data(df)
+    try:
+        # Load the data from CleanOne table using harvester_db
+        print("Loading data from CleanOne table...")
+        df = load_clean_one_data(harvester_db)
+        
+        # Clean and prepare the data and save to main_db
+        df = clean_and_prepare_data(df, main_db)
+        
+        # Plot price per mile distributions
+        print("\nGenerating price per mile plots...")
+        plot_price_per_mile(df)
+        
+        # Calculate and save route statistics
+        print("\nCalculating route statistics...")
+        route_stats = df.groupby('route').agg({
+            'price': ['mean', 'std', 'count'],
+            'airport_distance': 'mean'
+        }).round(2)
+        route_stats.columns = ['avg_price', 'price_std', 'flight_count', 'avg_distance']
+        route_stats = route_stats.sort_values('flight_count', ascending=False)
+        route_stats.to_csv('processed_data/route_statistics.csv')
+        print("Route statistics saved to processed_data/route_statistics.csv")
+        
+        print("\nData preparation complete!")
     
-    # Save the processed data
-    print("\nSaving processed data...")
-    df.to_csv('processed_data/model_input_data.csv', index=False)
-    print("Data saved to processed_data/model_input_data.csv")
-    
-    # Plot price per mile distributions
-    print("\nGenerating price per mile plots...")
-    plot_price_per_mile(df)
-    
-    # Calculate and save route statistics
-    print("\nCalculating route statistics...")
-    route_stats = df.groupby('route').agg({
-        'price': ['mean', 'std', 'count'],
-        'airport_distance': 'mean'
-    }).round(2)
-    route_stats.columns = ['avg_price', 'price_std', 'flight_count', 'avg_distance']
-    route_stats = route_stats.sort_values('flight_count', ascending=False)
-    route_stats.to_csv('processed_data/route_statistics.csv')
-    print("Route statistics saved to processed_data/route_statistics.csv")
-    
-    print("\nData preparation complete!")
+    finally:
+        harvester_db.close()
+        main_db.close()
 
 
 if __name__ == "__main__":

@@ -1,28 +1,191 @@
+"""
+Flight Price Prediction API
+
+This API provides endpoints for predicting private jet flight prices based on various parameters
+such as aircraft category, departure and arrival airports. It uses a machine learning model
+trained on historical flight data to make predictions.
+
+The API includes endpoints for:
+- Price prediction
+- Health status checking
+- Airport listing
+- Aircraft category information
+
+Author: Your Name
+Version: 1.0
+"""
+
 from flask import Flask, request, jsonify
+from flask_restx import Api, Resource, fields
 import pandas as pd
 import numpy as np
 
-from airport_utils.utils import load_airport_data, calculate_distance, check_airport_code
+from airport_utils.utils import (
+    calculate_distance, 
+    check_airport_code, 
+    get_airport_by_code,
+    get_airports_by_country
+)
 from model.utils import CATEGORY_LIMITS, load_model_components, CATEGORIES
 
+# Initialize Flask application
 app = Flask(__name__)
+
+# Initialize Flask-RESTX API with metadata
+api = Api(
+    app,
+    version='1.0',
+    title='Flight Price Prediction API',
+    description='''
+    API for predicting private jet flight prices.
+    
+    This API provides endpoints to:
+    - Predict flight prices for different aircraft categories
+    - Get available airports and aircraft categories
+    - Check API health status
+    
+    The prediction model takes into account:
+    - Aircraft category and model
+    - Departure and arrival airports
+    - Distance between airports
+    
+    All prices are predicted in the same currency unit as the training data.
+    ''',
+    doc='/',  # Serve Swagger UI at root URL
+    default='Flight Prediction',  # Default namespace
+    default_label='Flight Prediction Operations'
+)
+
+# Create namespaces
+ns = api.namespace('api', description='Flight prediction operations')
+
+# Define models for request/response documentation
+prediction_request = api.model('PredictionRequest', {
+    'category': fields.String(
+        required=True,
+        description='Aircraft category (e.g., "Light jet", "Heavy jet")',
+        enum=list(CATEGORIES),
+        example='Light jet'
+    ),
+    'leg_Departure_Airport': fields.String(
+        required=True,
+        description='IATA code of the departure airport (e.g., "JFK", "LAX")',
+        example='JFK'
+    ),
+    'leg_Arrival_Airport': fields.String(
+        required=True,
+        description='IATA code of the arrival airport (e.g., "LAX", "SFO")',
+        example='LAX'
+    )
+})
+
+prediction_response = api.model('PredictionResponse', {
+    'distance_nm': fields.Float(
+        description='Distance between airports in nautical miles',
+        example=2475.5
+    ),
+    'predictions': fields.List(
+        fields.Nested(api.model('Prediction', {
+            'predicted_price': fields.Float(
+                description='Predicted price for the flight',
+                example=15000.00
+            ),
+            'aircraft_model': fields.String(
+                description='Specific aircraft model used for prediction',
+                example='Citation II'
+            )
+        }))
+    )
+})
+
+error_response = api.model('ErrorResponse', {
+    'error': fields.String(
+        description='Detailed error message explaining what went wrong',
+        example='Invalid airport code: XYZ'
+    ),
+    'missing_fields': fields.List(
+        fields.String,
+        description='List of required fields that were not provided',
+        example=['category', 'leg_Departure_Airport']
+    ),
+    'invalid_fields': fields.List(
+        fields.String,
+        description='List of fields with invalid values',
+        example=['category']
+    )
+})
+
+health_response = api.model('HealthResponse', {
+    'status': fields.String(
+        description='Current health status of the API',
+        example='healthy'
+    ),
+    'model_loaded': fields.Boolean(
+        description='Whether the prediction model is successfully loaded',
+        example=True
+    ),
+    'airports_loaded': fields.Boolean(
+        description='Whether the airport database is successfully loaded',
+        example=True
+    )
+})
+
+airports_response = api.model('AirportsResponse', {
+    'airports': fields.List(
+        fields.Nested(api.model('Airport', {
+            'icao': fields.String(description='ICAO code'),
+            'iata': fields.String(description='IATA code'),
+            'name': fields.String(description='Airport name'),
+            'city': fields.String(description='City'),
+            'country': fields.String(description='Country')
+        }))
+    )
+})
+
+categories_response = api.model('CategoriesResponse', {
+    'categories': fields.List(
+        fields.String,
+        description='List of all available aircraft categories',
+        example=['Light jet', 'Heavy jet', 'Midsize jet']
+    ),
+    'distance_limits': fields.Raw(
+        description='Maximum allowed distance (in km) for each aircraft category',
+        example={'Light jet': 2000, 'Heavy jet': 5000}
+    )
+})
 
 # Constants
 MODEL_DIR = '../model/model_files'
 
-
-def validate_airports(dep_airport, arr_airport, airports_df):
-    """Validate that airports exist in the database."""
-    if not check_airport_code(dep_airport, airports_df):
+def validate_airports(dep_airport, arr_airport):
+    """
+    Validate that airports exist in the database.
+    
+    Args:
+        dep_airport (str): Departure airport IATA code
+        arr_airport (str): Arrival airport IATA code
+        
+    Raises:
+        ValueError: If either airport is not found or if they are the same
+    """
+    if not check_airport_code(dep_airport):
         raise ValueError(f"Departure airport '{dep_airport}' not found in database")
-    if not check_airport_code(arr_airport, airports_df):
+    if not check_airport_code(arr_airport):
         raise ValueError(f"Arrival airport '{arr_airport}' not found in database")
     if dep_airport == arr_airport:
         raise ValueError("Departure and arrival airports cannot be the same")
 
-
 def validate_category_distance(category, distance):
-    """Validate that the distance is within category limits and minimum distance."""
+    """
+    Validate that the distance is within category limits and minimum distance.
+    
+    Args:
+        category (str): Aircraft category
+        distance (float): Distance in kilometers
+        
+    Raises:
+        ValueError: If distance is less than minimum or exceeds category limit
+    """
     if distance < 55:
         raise ValueError(f"Distance ({distance:.0f} km) is less than minimum allowed distance (55 km)")
     if category in CATEGORY_LIMITS:
@@ -33,15 +196,26 @@ def validate_category_distance(category, distance):
                 f"({max_distance} km) for {category} aircraft"
             )
 
-def create_features(input_data, encoders, airports_df):
-    """Create features for prediction."""
+def create_features(input_data, encoders):
+    """
+    Create features for prediction from input data.
+    
+    Args:
+        input_data (dict): Dictionary containing input parameters
+        encoders (dict): Dictionary of encoders for categorical features
+        
+    Returns:
+        dict: Dictionary of features ready for model prediction
+        
+    Raises:
+        ValueError: If input validation fails
+    """
     features = {}
     
     # Validate airports
     validate_airports(
         input_data['leg_Departure_Airport'],
-        input_data['leg_Arrival_Airport'],
-        airports_df
+        input_data['leg_Arrival_Airport']
     )
     
     # Encode categorical features
@@ -57,8 +231,7 @@ def create_features(input_data, encoders, airports_df):
     # Calculate airport distance
     distance = calculate_distance(
         input_data['leg_Departure_Airport'],
-        input_data['leg_Arrival_Airport'],
-        airports_df
+        input_data['leg_Arrival_Airport']
     )
     if distance is None:
         raise ValueError(f"Could not calculate distance between {input_data['leg_Departure_Airport']} and {input_data['leg_Arrival_Airport']}")
@@ -78,16 +251,11 @@ def create_features(input_data, encoders, airports_df):
     
     return features
 
-# Load model components and airport data at startup
+# Load model components at startup
 print("Loading model components...")
 model, scaler, encoders, feature_names = load_model_components()
 
-print("Loading airport data...")
-airports_df = load_airport_data()
-if airports_df is None:
-    raise ValueError("Failed to load airport data")
-
-
+# Define available aircraft models for each category
 CATEGORY_MODELS = {
     'Piston': ['Cessna 402C', 'Cirrus SR 22', 'Piper Aerostar 600'],
     'Turbo prop': ['Piper M600', 'Pilatus PC12 NGX', 'King Air 350'],
@@ -100,99 +268,142 @@ CATEGORY_MODELS = {
     'Ultra long range': ['Gulfstream G550', 'Global 6500', 'Falcon 7X']
 }
 
-
-@app.route('/predict', methods=['POST'])
-def predict():
-    """API endpoint for price prediction."""
-    try:
-        # Get input data from request
-        input_data = request.get_json()
-        if not input_data:
-            return jsonify({'error': 'No input data provided'}), 400
+@ns.route('/predict')
+class Prediction(Resource):
+    @ns.expect(prediction_request)
+    @ns.response(200, 'Success', prediction_response)
+    @ns.response(400, 'Bad Request', error_response)
+    def post(self):
+        """
+        Make a price prediction for a flight route.
         
-        # Validate required fields
-        required_fields = ['category', 'leg_Departure_Airport', 'leg_Arrival_Airport']
-        missing_fields = [field for field in required_fields if field not in input_data]
-        if missing_fields:
-            return jsonify({
-                'error': 'Missing required fields',
-                'missing_fields': missing_fields
-            }), 400
+        This endpoint predicts the price for a flight between two airports using a specific
+        aircraft category. The prediction is made for all available aircraft models within
+        the specified category.
         
-        # Validate field types
-        if not all(isinstance(input_data[field], str) for field in required_fields):
-            return jsonify({
-                'error': 'All input fields must be strings',
-                'invalid_fields': [field for field in required_fields if not isinstance(input_data[field], str)]
-            }), 400
-        predictions = []
-        distance = None
-        if not input_data['category'] in CATEGORIES:
-            return jsonify({
-                'error': f'Invalid category: {input_data['category']}',
-                'available_categories': CATEGORIES
-            }), 400
+        The prediction takes into account:
+        - Distance between airports
+        - Aircraft category and specific models
+        - Historical route data
+        
+        Returns predictions for all available aircraft models in the specified category.
+        """
+        try:
+            # Get input data from request
+            input_data = request.get_json()
+            if not input_data:
+                return {'error': 'No input data provided'}, 400
+            
+            # Validate required fields
+            required_fields = ['category', 'leg_Departure_Airport', 'leg_Arrival_Airport']
+            missing_fields = [field for field in required_fields if field not in input_data]
+            if missing_fields:
+                return {
+                    'error': 'Missing required fields',
+                    'missing_fields': missing_fields
+                }, 400
+            
+            # Validate field types
+            if not all(isinstance(input_data[field], str) for field in required_fields):
+                return {
+                    'error': 'All input fields must be strings',
+                    'invalid_fields': [field for field in required_fields if not isinstance(input_data[field], str)]
+                }, 400
+            
+            predictions = []
+            distance = None
+            if not input_data['category'] in CATEGORIES:
+                return {
+                    'error': f'Invalid category: {input_data["category"]}',
+                    'available_categories': CATEGORIES
+                }, 400
 
-        for aircraftModel in CATEGORY_MODELS[input_data['category']]:
-            input_data["aircraftModel"] = aircraftModel
+            for aircraftModel in CATEGORY_MODELS[input_data['category']]:
+                input_data["aircraftModel"] = aircraftModel
 
-            # Create features
-            features = create_features(input_data, encoders, airports_df)
-            distance = float(features['airport_distance'])
-            # Create DataFrame with features in the correct order
-            feature_df = pd.DataFrame([features])
-            feature_df = feature_df[feature_names]  # Ensure correct feature order
+                # Create features
+                features = create_features(input_data, encoders)
+                distance = float(features['airport_distance'])
+                # Create DataFrame with features in the correct order
+                feature_df = pd.DataFrame([features])
+                feature_df = feature_df[feature_names]  # Ensure correct feature order
 
-            # Scale features
-            scaled_features = scaler.transform(feature_df)
+                # Scale features
+                scaled_features = scaler.transform(feature_df)
 
-            # Make prediction (model was trained on log-transformed prices)
-            log_prediction = model.predict(scaled_features)[0]
-            predicted_price = np.expm1(log_prediction)  # Transform back from log
+                # Make prediction (model was trained on log-transformed prices)
+                log_prediction = model.predict(scaled_features)[0]
+                predicted_price = np.expm1(log_prediction)  # Transform back from log
 
-            # Prepare response
-            predictions.append({
-                'predicted_price': round(float(predicted_price), 2),
-                'aircraft_model': aircraftModel,
-            })
-        del input_data['aircraftModel']
+                # Prepare response
+                predictions.append({
+                    'predicted_price': round(float(predicted_price), 2),
+                    'aircraft_model': aircraftModel,
+                })
+            del input_data['aircraftModel']
 
-        response = {
-            "distance_nm": round(float(distance), 2),
-            "predictions": predictions
+            response = {
+                "distance_nm": round(float(distance), 2),
+                "predictions": predictions
+            }
+            return response
+        
+        except ValueError as e:
+            return {'error': str(e)}, 400
+
+@ns.route('/health')
+class Health(Resource):
+    @ns.response(200, 'Success', health_response)
+    def get(self):
+        """
+        Check API health status.
+        
+        This endpoint provides information about the current state of the API,
+        including whether the prediction model and airport database are properly loaded.
+        
+        Returns:
+            dict: Health status information
+        """
+        return {
+            'status': 'healthy',
+            'model_loaded': model is not None,
+            'airports_loaded': True  # Database is always available
         }
-        return jsonify(response)
-    
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    #except Exception as e:
-    #    app.logger.error(f"Unexpected error: {str(e)}")
-    #    return jsonify({'error': 'An unexpected error occurred'}), 500
 
+@ns.route('/airports')
+class Airports(Resource):
+    @ns.response(200, 'Success', airports_response)
+    def get(self):
+        """
+        List all available airports.
+        
+        This endpoint returns a list of all airports that are available
+        in the database for making predictions.
+        
+        Returns:
+            dict: List of airport information
+        """
+        # Get all US airports as an example (you might want to modify this based on your needs)
+        airports = get_airports_by_country('United States')
+        return {'airports': airports}
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Health check endpoint."""
-    return jsonify({
-        'status': 'healthy',
-        'model_loaded': model is not None,
-        'airports_loaded': airports_df is not None
-    })
-
-@app.route('/airports', methods=['GET'])
-def list_airports():
-    """List all available airports."""
-    return jsonify({
-        'airports': airports_df['IATA'].tolist()
-    })
-
-@app.route('/categories', methods=['GET'])
-def list_categories():
-    """List all available aircraft categories and their distance limits."""
-    return jsonify({
-        'categories': list(CATEGORIES),
-        'distance_limits': CATEGORY_LIMITS
-    })
+@ns.route('/categories')
+class Categories(Resource):
+    @ns.response(200, 'Success', categories_response)
+    def get(self):
+        """
+        List all available aircraft categories and their distance limits.
+        
+        This endpoint returns information about all available aircraft categories
+        and their maximum allowed flight distances.
+        
+        Returns:
+            dict: List of categories and their distance limits
+        """
+        return {
+            'categories': list(CATEGORIES),
+            'distance_limits': CATEGORY_LIMITS
+        }
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True) 
